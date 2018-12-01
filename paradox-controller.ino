@@ -163,11 +163,10 @@ const String ALARM_STATUS_ALARM_ZONE = "ALARM_ZONE";
 const String ALARM_STATUS_ALARM_PANIC = "ALARM_PANIC";
 const String ALARM_STATUS_ALARM_OFF = "ALARM_OFF";
 
-const boolean TRACE = false;
-
 const String mqttTopicEvent = "paradox/event";
 const String mqttTopicStatus = "paradox/status";
-const String mqttTopicAction = "paradox/action/";
+const String mqttTopicAction1 = "paradox/action/1";
+const String mqttTopicAction2 = "paradox/action/2";
 const String mqttTopicEventZone = "paradox/event/zone/";
 const String mqttTopicAlarmStatus = "paradox/alarm_status/";
 
@@ -202,15 +201,13 @@ void setup() {
   blink(1000);
   flushSerialBuffer();
   readConfig();
-  wifi_station_set_hostname(serverHostname);
+//  wifi_station_set_hostname(serverHostname);
   setupWiFi();
   ArduinoOTA.setHostname("ParadoxController");
   ArduinoOTA.begin();
   trc("Finnished wifi setup");
   delay(1500);
   lastReconnectAttempt = 0;
-  
-  sendMQTT(mqttTopicStatus,"ParadoxController");
 }
 
 void loop() {
@@ -288,13 +285,13 @@ void readSerial() {
   }                            
 
   pindex = 0;
-    
+
   while (pindex < FIXED_MESSAGE_SIZE) {  // Paradox packet is 37 bytes 
     inData[pindex++] = Serial.read();            
   }
 
   inData[++pindex] = 0x00; // Make it print-friendly
-  
+
   if ((inData[0] & 0xF0) == COMMAND_LIVE_EVENT) {
     byte armstatus = inData[0];
     byte event = inData[7];
@@ -401,7 +398,7 @@ byte getPanelCommand(String data){
   data.toLowerCase();
   if (data == "stay" || data=="0") {
     retval = ACTION_STAY_ARM;
-  } else if (data== "arm" || data=="1") {    
+  } else if (data == "arm" || data=="1") {    
     retval = ACTION_FULL_ARM;
   } else if (data == "sleep" || data=="2") {
     retval = ACTION_SLEEP_ARM;
@@ -515,6 +512,7 @@ void panelDisconnect() {
 }
 
 void doLogin(byte pass1, byte pass2) {
+  
   byte data[FIXED_MESSAGE_SIZE] = {};
   byte data1[FIXED_MESSAGE_SIZE] = {};
   byte checksum;
@@ -573,8 +571,10 @@ void doLogin(byte pass1, byte pass2) {
 }
 
 void flushSerialBuffer(){
-  while (Serial.read() >= 0)
-  ;
+  while (Serial.read() >= 0) {
+    ArduinoOTA.handle();
+    client.loop();
+  }
 }
 
 void setupWiFi(){
@@ -647,8 +647,8 @@ boolean reconnect() {
       trc("Connected to MQTT Server");
       sendMQTT(mqttTopicStatus,"Paradox Connected");
       //Topic subscribed so as to get data
-      subscribing(mqttTopicAction + "1");
-      subscribing(mqttTopicAction + "2");
+      subscribing(mqttTopicAction1);
+      subscribing(mqttTopicAction2);
     } else {
       trc("Failed to connect to MQTT Server");
       trc(String(client.state()));
@@ -701,9 +701,7 @@ void readConfig() {
 }
 
 void trc(String msg){
-  if (TRACE) {
-   sendMQTT(mqttTopicStatus,msg);
-  }
+  //Serial.println(msg);
 }
 
 void blink(int duration) {
