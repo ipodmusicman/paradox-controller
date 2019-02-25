@@ -121,9 +121,22 @@ const byte EVENT_GROUP_ZONE_FORCED = 58;
 const byte EVENT_GROUP_ZONE_INCLUDED = 59;
 const byte EVENT_GROUP_SYSTEM_STATUS = 64;
 
+const byte PARTITION_STATUS_SILENT_ALARM = 2;
+const byte PARTITION_STATUS_BUZZER_ALARM = 3;
+const byte PARTITION_STATUS_STEADY_ALARM = 4;
+const byte PARTITION_STATUS_PULSED_ALARM = 5;
+const byte PARTITION_STATUS_STROBE = 6;
 const byte PARTITION_STATUS_ALARM_STOPPED = 7;
-const byte PARTITION_STATUS_DISARM = 11;
-const byte PARTITION_STATUS_ARM = 12;
+const byte PARTITION_STATUS_SQUAWK_ON = 8;
+const byte PARTITION_STATUS_SQUAWK_OFF = 9;
+const byte PARTITION_STATUS_GROUND_START = 10;
+const byte PARTITION_STATUS_DISARM_PARTITION = 11;
+const byte PARTITION_STATUS_ARM_PARTITION = 12;
+const byte PARTITION_STATUS_ENTRY_DELAY_STARTED = 13;
+const byte PARTITION_STATUS_EXIT_DELAY_STARTED = 14;
+const byte PARTITION_STATUS_PRE_ALARM_DELAY = 15;
+const byte PARTITION_STATUS_REPORT_CONFIRMATION = 16;
+const byte PARTITION_STATUS_ANY_PARTITION_STATUS_EVENT = 99;
 
 const byte SPECIAL_ALARM_PANIC_NON_MEDICAL = 0;
 
@@ -157,17 +170,18 @@ const byte ACTION_PERFORM_A_BUS_SCAN_MODULE = 0x85;
 
 const int FIXED_MESSAGE_SIZE = 37;
 
-const String ALARM_STATUS_ARM = "ARM";
-const String ALARM_STATUS_DISARM = "DISARM";
-const String ALARM_STATUS_ALARM_ZONE = "ALARM_ZONE";
-const String ALARM_STATUS_ALARM_PANIC = "ALARM_PANIC";
-const String ALARM_STATUS_ALARM_OFF = "ALARM_OFF";
+const String ALARM_STATUS_ARMED_HOME = "armed_home";
+const String ALARM_STATUS_ARMED_AWAY = "armed_away";
+const String ALARM_STATUS_DISARMED = "disarmed";
+const String ALARM_STATUS_ALARM_TRIGGERED = "triggered";
+const String ALARM_STATUS_ALARM_STOPPED = "stopped";
 
 const String mqttTopicEvent = "paradox/event";
 const String mqttTopicStatus = "paradox/status";
 const String mqttTopicAction1 = "paradox/action/1";
 const String mqttTopicAction2 = "paradox/action/2";
 const String mqttTopicEventZone = "paradox/event/zone/";
+const String mqttTopicTriggerZone = "paradox/event/trigger_zone";
 const String mqttTopicAlarmStatus = "paradox/alarm_status/";
 
 WiFiClient wifiClient;
@@ -206,6 +220,9 @@ void setup() {
   ArduinoOTA.setHostname("ParadoxController");
   ArduinoOTA.begin();
   trc("Finnished wifi setup");
+  blink(100);
+  blink(100);
+  blink(100);
   delay(1500);
   lastReconnectAttempt = 0;
 }
@@ -222,24 +239,26 @@ void sendJsonString (byte armstatus, byte event, byte sub_event, byte partition,
   String retval = "{ \"armstatus\":" + String(armstatus) + ", \"event\":" + String(event) + ", \"sub_event\":" + String(sub_event) + ", , \"partition\":" + String(partition) + ", \"label\":\"" + String(label) + "\"}";
 
   if (event == EVENT_GROUP_PARTITION_STATUS) {
-    if (sub_event == PARTITION_STATUS_ALARM_STOPPED) {
-      sendMQTT(mqttTopicAlarmStatus + String(partition + 1), ALARM_STATUS_ALARM_OFF, true); 
+    if (sub_event == PARTITION_STATUS_ARM_PARTITION) {
+      sendMQTT(mqttTopicAlarmStatus + String(partition + 1), ALARM_STATUS_ARMED_AWAY, true);
       return;
-    } else if (sub_event == PARTITION_STATUS_ARM) {
-      sendMQTT(mqttTopicAlarmStatus + String(partition + 1), ALARM_STATUS_ARM, true);
+    } else if (sub_event == PARTITION_STATUS_DISARM_PARTITION) {
+      sendMQTT(mqttTopicTriggerZone, "0", true); 
+      sendMQTT(mqttTopicAlarmStatus + String(partition + 1), ALARM_STATUS_DISARMED, true); 
       return;
-    } else if (sub_event == PARTITION_STATUS_DISARM) {
-      sendMQTT(mqttTopicAlarmStatus + String(partition + 1), ALARM_STATUS_DISARM, true); 
+    } else if (sub_event == PARTITION_STATUS_ALARM_STOPPED) {
+      sendMQTT(mqttTopicAlarmStatus + String(partition + 1), ALARM_STATUS_ALARM_STOPPED, true); 
       return;
     }
   } else if (event == EVENT_GROUP_SPECIAL_ALARM) {
     if (sub_event == SPECIAL_ALARM_PANIC_NON_MEDICAL) {
-      sendMQTT(mqttTopicAlarmStatus + String(partition + 1), ALARM_STATUS_ALARM_PANIC, true); 
+      sendMQTT(mqttTopicAlarmStatus + String(partition + 1), ALARM_STATUS_ALARM_TRIGGERED, true); 
       return;
     }
   } else if (event == EVENT_GROUP_ZOME_IN_ALARM) {
     sendMQTT(mqttTopicEventZone + String(sub_event), "1", true); 
-    sendMQTT(mqttTopicAlarmStatus + String(partition + 1), ALARM_STATUS_ALARM_ZONE, true); 
+    sendMQTT(mqttTopicTriggerZone, String(sub_event), true); 
+    sendMQTT(mqttTopicAlarmStatus + String(partition + 1), ALARM_STATUS_ALARM_TRIGGERED, true); 
     return;
   } else if (event == EVENT_GROUP_ZONE_ALARM_RESTORE) {
     sendMQTT(mqttTopicEventZone + String(sub_event), "0", true); 
@@ -302,16 +321,11 @@ void readSerial() {
     sendJsonString(armstatus, event, sub_event, partition, label);
     if (event == EVENT_GROUP_SPECIAL && sub_event == SPECIAL_SOFTWARE_LOG_OFF) {
       pannelConnected = false;
-      sendMQTT(mqttTopicStatus, "Panel logout");
     } else if (event == EVENT_GROUP_SPECIAL && sub_event == SPECIAL_SOFTWARE_LOG_ON && !pannelConnected) {
       pannelConnected = true;
-      sendMQTT(mqttTopicStatus, "Panel Login");
     }
   } else if (inData[0] == COMMAND_INITIALISE_COMMUNICATION_SUCCESSFUL) {
     panelInitialised = true;
-    sendMQTT(mqttTopicStatus, "Panel communication initialised");
-  } else if (inData[0] == COMMAND_COMMUNICATION_ERROR) {
-    sendMQTT(mqttTopicStatus, "Panel communication error");
   }
 }
 
@@ -354,12 +368,10 @@ void callback(char* topic, byte* payload, unsigned int length) {
 
   if (!pannelConnected) {
     trc("Problem connecting to panel");
-    sendMQTT(mqttTopicStatus, "Problem connecting to panel");
   } else if (data.Command != 0x00 && pannelConnected )  {
     controlPanel(data);
   } else {
     trc("Bad Command ");
-    sendMQTT(mqttTopicStatus, "Bad Command ");
   }
 }
 
@@ -396,11 +408,11 @@ struct inPayload decodePayload(String partitionZone, String payload) {
 byte getPanelCommand(String data){
   byte retval = 0x00;
   data.toLowerCase();
-  if (data == "stay" || data=="0") {
+  if (data == "arm_home" || data == "stay" || data == "0") {
     retval = ACTION_STAY_ARM;
-  } else if (data == "arm" || data=="1") {    
+  } else if (data == "arm_away" || data == "1") {    
     retval = ACTION_FULL_ARM;
-  } else if (data == "sleep" || data=="2") {
+  } else if (data == "arm_night" || data == "2") {
     retval = ACTION_SLEEP_ARM;
   } else if (data == "disarm" || data == "3") {
     retval = ACTION_DISARM;
@@ -480,7 +492,6 @@ void controlPanel(inPayload data){
   readSerial();
 
   if ( inData[0] >= 40 && inData[0] <= 45) {
-    sendMQTT(mqttTopicStatus, "Command success ");
     trc(" Command success ");
   }
 }
@@ -642,10 +653,13 @@ boolean reconnect() {
 
     char topicStatus[50];
     mqttTopicStatus.toCharArray(topicStatus, 50);
-
-    if (client.connect(charBuf, topicStatus, 0, false, "Paradox Disconnected")) {
+    blink(100);
+    if (client.connect(charBuf, topicStatus, 0, true, "offline")) {
       trc("Connected to MQTT Server");
-      sendMQTT(mqttTopicStatus,"Paradox Connected");
+      blink(50);
+      blink(50);
+      blink(50);
+      sendMQTT(mqttTopicStatus,"online", true);
       //Topic subscribed so as to get data
       subscribing(mqttTopicAction1);
       subscribing(mqttTopicAction2);
