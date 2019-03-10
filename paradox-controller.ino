@@ -366,11 +366,6 @@ void saveConfigCallback () {
 }
 
 void callback(char* topic, byte* payload, unsigned int length) {
-  // In order to republish this payload, a copy must be made
-  // as the orignal payload buffer will be overwritten whilst
-  // constructing the PUBLISH packet.
-  trc("Hey I got a callback ");
-  // Conversion to a printable string
   payload[length] = '\0';
 
   String strTopic(topic);
@@ -621,7 +616,7 @@ void readSerial() {
   trc("About to read the serial port");
   while (Serial.available() < FIXED_MESSAGE_SIZE) {
     ArduinoOTA.handle();
-    client.loop();
+    handleMqttKeepAlive();
   }
   trc("All 37 bytes are present.  Reading bytes");
 
@@ -679,6 +674,7 @@ void sendJsonString (byte command, byte eventGroupNumber, byte eventSubGroupNumb
     }
   } else if (eventGroupNumber == EVENT_GROUP_SPECIAL_ALARM) {
     if (eventSubGroupNumber == SPECIAL_ALARM_PANIC_NON_MEDICAL) {
+      sendMQTT(mqttTopicTriggerZone, "panic", false);
       sendMQTT(mqttTopicAlarmStatus + String(partition + 1), ALARM_STATUS_ALARM_TRIGGERED, true);
       return;
     }
@@ -707,6 +703,17 @@ void sendMQTT(String topicNameSend, String dataStr) {
 }
 
 void sendMQTT(String topicNameSend, String dataStr, boolean retained) {
+  handleMqttKeepAlive();
+  char topicStrSend[40];
+  topicNameSend.toCharArray(topicStrSend, 40);
+  char dataStrSend[200];
+  dataStr.toCharArray(dataStrSend, 200);
+  if (!client.publish(topicStrSend, dataStrSend, retained)) {
+    trc("Message not published");
+  }
+}
+
+void handleMqttKeepAlive() {
   if (!client.connected()) {
     long now = millis();
     if (now - lastReconnectAttempt > 5000) {
@@ -718,13 +725,6 @@ void sendMQTT(String topicNameSend, String dataStr, boolean retained) {
     }
   } else {
     client.loop();
-  }
-  char topicStrSend[40];
-  topicNameSend.toCharArray(topicStrSend, 40);
-  char dataStrSend[200];
-  dataStr.toCharArray(dataStrSend, 200);
-  if (!client.publish(topicStrSend, dataStrSend, retained)) {
-    trc("Message not published");
   }
 }
 
