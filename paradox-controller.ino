@@ -1,17 +1,13 @@
 /*
- * Paradox Controller
- * 
- * This is a bridge between Paradox alarm systems and MQTT
- * 
- * Note that I cannot take credit for the full development of this sketch.  See https://github.com/maragelis/ParadoxRs232toMqtt
- * Modified for own use.
- * 
- * Still to do:
- * 
- * Periodically get the status from the alarm panel to maintain alarm state is correct.
- * Clean-ups and refactoring
- */
-#include <FS.h>   
+   Paradox Controller
+
+   This is a bridge between Paradox alarm systems and MQTT, but also implementing MQTT alarm
+
+   Note that I cannot take credit for the full development of this sketch.  See https://github.com/maragelis/ParadoxRs232toMqtt
+   Modified and refactored.
+
+*/
+#include <FS.h>
 #include <SoftwareSerial.h>
 #include <ESP8266WiFi.h>
 #include <ESP8266mDNS.h>
@@ -21,6 +17,7 @@
 #include <PubSubClient.h>
 #include <WiFiManager.h>
 #include <ArduinoJson.h>
+#include <Ticker.h>
 
 #define mqttServerAddress "127.0.0.1"
 #define mqttServerPort "1883"
@@ -34,9 +31,9 @@ const byte COMMAND_INITIALISE_COMMUNICATION = 0x00;
 const byte COMMAND_INITIALISE_COMMUNICATION_SUCCESSFUL = 0x10;
 const byte COMMAND_SET_TIME_AND_DATE = 0x30;
 const byte COMMAND_PERFORM_ACTION = 0x40;
-const byte COMMAND_PANEL_STATUS = 0x50;
+const byte COMMAND_PANEL_STATUS_1 = 0x50;
 const byte COMMAND_WRITE_DATA_TO_EEPROM = 0x60;
-const byte COMMAND_DISCONNECT = 0x70;
+const byte COMMAND_CLOSE_CONNECTION = 0x70;
 const byte COMMAND_COMMUNICATION_ERROR = 0x70;
 const byte COMMAND_SAVE_WINLOAD_EVENT_POINTER = 0x80;
 const byte COMMAND_SPECIAL_ACTION = 0x90;
@@ -190,19 +187,14 @@ PubSubClient client(wifiClient);
 bool shouldSaveConfig = false;
 bool panelInitialised = false;
 bool pannelConnected = false;
+bool queryPanelStatus = false;
 
 long lastReconnectAttempt = 0;
 
-char inData[38]; // Allocate some space for the string
-byte pindex = 0; // Index into array; where to store the character
+char responseMessage[38]; // Allocate some space for the response message
+Ticker pollStatusTimer;
+boolean busy = false;
 
-struct inPayload {
-  byte pcPasswordFirst2Digits;
-  byte pcPasswordSecond2Digits;
-  byte Command;
-  byte Subcommand;
- };
- 
 void setup() {
   pinMode(LED_BUILTIN, OUTPUT);
   blink(100);
@@ -215,385 +207,24 @@ void setup() {
   blink(1000);
   flushSerialBuffer();
   readConfig();
-//  wifi_station_set_hostname(serverHostname);
   setupWiFi();
   ArduinoOTA.setHostname("ParadoxController");
   ArduinoOTA.begin();
-  trc("Finnished wifi setup");
+  trc("Finished wifi setup");
   blink(100);
   blink(100);
   blink(100);
   delay(1500);
   lastReconnectAttempt = 0;
+  pollStatusTimer.attach(5, checkPanelStatus);
 }
 
-void loop() {
-  readSerial();
-  if ((inData[0] & 0xF0) != COMMAND_LIVE_EVENT){ // re-align serial buffer
-    blink(200);
-    flushSerialBuffer();
-  }
-}
-
-void sendJsonString (byte armstatus, byte event, byte sub_event, byte partition, String label) {
-  String retval = "{ \"armstatus\":" + String(armstatus) + ", \"event\":" + String(event) + ", \"sub_event\":" + String(sub_event) + ", , \"partition\":" + String(partition) + ", \"label\":\"" + String(label) + "\"}";
-
-  if (event == EVENT_GROUP_PARTITION_STATUS) {
-    if (sub_event == PARTITION_STATUS_ARM_PARTITION) {
-      sendMQTT(mqttTopicAlarmStatus + String(partition + 1), ALARM_STATUS_ARMED_AWAY, true);
-      return;
-    } else if (sub_event == PARTITION_STATUS_DISARM_PARTITION) {
-      sendMQTT(mqttTopicTriggerZone, "0", true); 
-      sendMQTT(mqttTopicAlarmStatus + String(partition + 1), ALARM_STATUS_DISARMED, true); 
-      return;
-    } else if (sub_event == PARTITION_STATUS_ALARM_STOPPED) {
-      sendMQTT(mqttTopicAlarmStatus + String(partition + 1), ALARM_STATUS_ALARM_STOPPED, true); 
-      return;
-    }
-  } else if (event == EVENT_GROUP_SPECIAL_ALARM) {
-    if (sub_event == SPECIAL_ALARM_PANIC_NON_MEDICAL) {
-      sendMQTT(mqttTopicAlarmStatus + String(partition + 1), ALARM_STATUS_ALARM_TRIGGERED, true); 
-      return;
-    }
-  } else if (event == EVENT_GROUP_ZOME_IN_ALARM) {
-    sendMQTT(mqttTopicEventZone + String(sub_event), "1", true); 
-    sendMQTT(mqttTopicTriggerZone, String(sub_event), true); 
-    sendMQTT(mqttTopicAlarmStatus + String(partition + 1), ALARM_STATUS_ALARM_TRIGGERED, true); 
-    return;
-  } else if (event == EVENT_GROUP_ZONE_ALARM_RESTORE) {
-    sendMQTT(mqttTopicEventZone + String(sub_event), "0", true); 
-    return;
-  } else if (event == EVENT_GROUP_ZONE_CLOSED || event == EVENT_GROUP_ZONE_OPEN) {
-    sendMQTT(mqttTopicEventZone + String(sub_event), String(event), true); 
-    return;
-  }
-  sendMQTT(mqttTopicEvent, retval); 
-}
-
-void sendMQTT(String topicNameSend, String dataStr) {
-  sendMQTT(topicNameSend, dataStr, false); 
-}
-
-
-void sendMQTT(String topicNameSend, String dataStr, boolean retained) {
-  if (!client.connected()) {
-    long now = millis();
-    if (now - lastReconnectAttempt > 5000) {
-      lastReconnectAttempt = now;
-      trc("MQTT not connected.  Attemping to reconnect ...");
-      if (reconnect()) {
-        lastReconnectAttempt = 0;
-      }
-    }
-  } else {
-    client.loop();
-  }
-  char topicStrSend[26];
-  topicNameSend.toCharArray(topicStrSend,26);
-  char dataStrSend[200];
-  dataStr.toCharArray(dataStrSend,200);
-  if (!client.publish(topicStrSend, dataStrSend, retained)) {
-    trc("Message not published");
-  }
-}
-
-void readSerial() {
-  while (Serial.available() < FIXED_MESSAGE_SIZE) { 
-    ArduinoOTA.handle();
-    client.loop();
-  }                            
-
-  pindex = 0;
-
-  while (pindex < FIXED_MESSAGE_SIZE) {  // Paradox packet is 37 bytes 
-    inData[pindex++] = Serial.read();            
-  }
-
-  inData[++pindex] = 0x00; // Make it print-friendly
-
-  if ((inData[0] & 0xF0) == COMMAND_LIVE_EVENT) {
-    byte armstatus = inData[0];
-    byte event = inData[7];
-    byte sub_event = inData[8];
-    byte partition = inData[9];
-    String label = String(inData[15]) + String(inData[16]) + String(inData[17]) + String(inData[18]) + String(inData[19]) + String(inData[20]) + String(inData[21]) + String(inData[22]) + String(inData[23]) + String(inData[24]) + String(inData[25]) + String(inData[26]) + String(inData[27]) + String(inData[28]) + String(inData[29]) + String(inData[30]);
-    label.trim();
-    sendJsonString(armstatus, event, sub_event, partition, label);
-    if (event == EVENT_GROUP_SPECIAL && sub_event == SPECIAL_SOFTWARE_LOG_OFF) {
-      pannelConnected = false;
-    } else if (event == EVENT_GROUP_SPECIAL && sub_event == SPECIAL_SOFTWARE_LOG_ON && !pannelConnected) {
-      pannelConnected = true;
-    }
-  } else if (inData[0] == COMMAND_INITIALISE_COMMUNICATION_SUCCESSFUL) {
-    panelInitialised = true;
-  }
-}
-
-void saveConfigCallback () {
-  shouldSaveConfig = true;
-}
-
-void callback(char* topic, byte* payload, unsigned int length) {
-  // In order to republish this payload, a copy must be made
-  // as the orignal payload buffer will be overwritten whilst
-  // constructing the PUBLISH packet.
-  trc("Hey I got a callback ");
-  // Conversion to a printable string
-  payload[length] = '\0';
-
-  String strTopic(topic);
-
-  int partitionZoneIndex = strTopic.lastIndexOf("/");
-  String partitionZone;
-
-  if (partitionZoneIndex != -1) {
-    partitionZone = strTopic.substring(partitionZoneIndex + 1);
-  }
-
-  inPayload data = decodePayload(partitionZone, String ((char*)payload));
-
-  panelInitialised = false;
-
-  doLogin(data.pcPasswordFirst2Digits, data.pcPasswordSecond2Digits);
-
-  if (!panelInitialised) {
-    return;
-  }
-
-  int cnt = 0;
-  while (!pannelConnected && cnt < 10) {
-    readSerial();
-    cnt++;    
-  }
-
-  if (!pannelConnected) {
-    trc("Problem connecting to panel");
-  } else if (data.Command != 0x00 && pannelConnected )  {
-    controlPanel(data);
-  } else {
-    trc("Bad Command ");
-  }
-}
-
-struct inPayload decodePayload(String partitionZone, String payload) {
-  char charpass1[4];
-  char charpass2[4];
-  char charsubcommand[4];
-  
-  String password = "0000";
-
-  String pass1 = password.substring(0, 2);
-  String pass2 = password.substring(2, 4);
-
-  pass1.toCharArray(charpass1, 4);
-  pass2.toCharArray(charpass2, 4);
-  partitionZone.toCharArray(charsubcommand,4);
-
-  unsigned long number1 = strtoul(charpass1, nullptr, 16);
-  unsigned long number2 = strtoul(charpass2, nullptr, 16);
-  unsigned long number3 = strtoul(charsubcommand, nullptr, 16);
-
-  number3--;
-
-  byte panelPassword1 = number1 & 0xFF; 
-  byte panelPassword2 = number2 & 0xFF; 
-  byte commandB = getPanelCommand(payload);
-  byte subCommand = number3 & 0xFF;
-  
-  inPayload data1 = {panelPassword1, panelPassword2, commandB, subCommand};
-
-  return data1;
-}
-
-byte getPanelCommand(String data){
-  byte retval = 0x00;
-  data.toLowerCase();
-  if (data == "arm_home" || data == "stay" || data == "0") {
-    retval = ACTION_STAY_ARM;
-  } else if (data == "arm_away" || data == "1") {    
-    retval = ACTION_FULL_ARM;
-  } else if (data == "arm_night" || data == "2") {
-    retval = ACTION_SLEEP_ARM;
-  } else if (data == "disarm" || data == "3") {
-    retval = ACTION_DISARM;
-  } else if (data == "bypass" || data == "10") {
-    retval = ACTION_BYPASS;
-  } else if (data == "setdate") {
-    panelSetDate();
-  } else if (data == "disconnect" || data == "99") {
-    panelDisconnect();
-  }
-
-  return retval;
-}
-
-void panelSetDate(){
-  byte data[FIXED_MESSAGE_SIZE] = {};
-  byte checksum;
-  for (int x = 0; x < FIXED_MESSAGE_SIZE; x++) {
-    data[x] = 0x00;
-  }
-
-  data[0] = COMMAND_SET_TIME_AND_DATE;
-  data[4] = 0x21;
-  data[5] = 0x18;
-  data[6] = 0x02;
-  data[7] = 0x06;
-  data[8] = 0x01;
-  data[9] = 0x22;
-  data[33] = 0x01;
-
-  checksum = 0;
-  for (int x = 0; x < FIXED_MESSAGE_SIZE - 1; x++) {
-    checksum += data[x];
-  }
-
-  while (checksum > 255) {
-    checksum = checksum - (checksum / 256) * 256;
-  }
-
-  data[36] = checksum & 0xFF;
-
-  Serial.write(data, FIXED_MESSAGE_SIZE);
-}
-
-void controlPanel(inPayload data){
-  byte armdata[FIXED_MESSAGE_SIZE] = {};
-  byte checksum;
-  for (int x = 0; x < FIXED_MESSAGE_SIZE; x++) {
-    armdata[x] = 0x00;
-  }
-
-  armdata[0] = COMMAND_PERFORM_ACTION;
-  armdata[2] = data.Command;
-  armdata[3] = data.Subcommand;;
-  armdata[33] = 0x01;
-  armdata[34] = 0x00;
-  armdata[35] = 0x00;
-  checksum = 0;
-  
-  for (int x = 0; x < FIXED_MESSAGE_SIZE - 1; x++) {
-    checksum += armdata[x];
-  }
-
-  while (checksum > 255) {
-    checksum = checksum - (checksum / 256) * 256;
-  }
-
-  armdata[36] = checksum & 0xFF;
-
-  while (Serial.available() > FIXED_MESSAGE_SIZE)  {
-    trc("serial cleanup");
-    readSerial();
-  }
-
-  trc("sending Data");
-  Serial.write(armdata, FIXED_MESSAGE_SIZE);
-  readSerial();
-
-  if ( inData[0] >= 40 && inData[0] <= 45) {
-    trc(" Command success ");
-  }
-}
-
-void panelDisconnect() {
-  byte data[FIXED_MESSAGE_SIZE] = {};
-  byte checksum;
-  for (int x = 0; x < FIXED_MESSAGE_SIZE; x++) {
-    data[x] = 0x00;
-  }
-
-  data[0] = COMMAND_DISCONNECT;
-  data[2] = 0x05; // Validation byte
-  data[33] = 0x01;
-
-  checksum = 0;
-  for (int x = 0; x < FIXED_MESSAGE_SIZE - 1; x++) {
-    checksum += data[x];
-  }
-
-  while (checksum > 255) {
-    checksum = checksum - (checksum / 256) * 256;
-  }
-
-  data[36] = checksum & 0xFF;
-
-  Serial.write(data, FIXED_MESSAGE_SIZE);
-  readSerial();
-}
-
-void doLogin(byte pass1, byte pass2) {
-  
-  byte data[FIXED_MESSAGE_SIZE] = {};
-  byte data1[FIXED_MESSAGE_SIZE] = {};
-  byte checksum;
-
-  for (int x = 0; x < FIXED_MESSAGE_SIZE; x++) {
-    data[x] = 0x00;
-    data1[x] = 0x00;
-  }
-
-  flushSerialBuffer();
-  data[0] = COMMAND_START_COMMUNICATION;
-  data[1] = 0x20; // Extra validation byte
-  data[33] = SOURCE_ID_WINLOAD_DIRECT;
-  data[34] = 0x00; // User ID high byte
-  data[35] = 0x00; // User ID low byte
-
-  checksum = 0;
-  for (int x = 0; x < FIXED_MESSAGE_SIZE - 1; x++) {
-    checksum += data[x];
-  }
-
-  while (checksum > 255) {
-    checksum = checksum - (checksum / 256) * 256;
-  }
-
-  data[36] = checksum & 0xFF;
-
-  Serial.write(data, FIXED_MESSAGE_SIZE);
-  readSerial();
-
-  data1[0] = COMMAND_INITIALISE_COMMUNICATION;
-  data1[4] = inData[4]; // Panel Product ID
-  data1[5] = inData[5]; // Panel Firmware Version
-  data1[6] = inData[6]; // Panel Firmware Revision
-  data1[7] = inData[7]; // Panel Firmware Build
-  data1[8] = inData[8]; // Programmmed Panel ID Digit 1 & 2 (Not required for NEware)
-  data1[9] = inData[9]; // Programmmed Panel ID Digit 3 & 4 (Not required for NEware)
-  data1[10] = pass1; // Panel PC Password Digit 1 & 2 (Not required for NEware)
-  data1[11] = pass2; // Panel PC Password Digit 3 & 4 (Not required for NEware)
-  data1[13] = 0x00; // Source Mode (old method) 0x00 Winload, 0x55 NEware
-  data1[33] = SOURCE_ID_WINLOAD_DIRECT;
-
-  checksum = 0;
-  for (int x = 0; x < FIXED_MESSAGE_SIZE - 1; x++) {
-    checksum += data1[x];
-  }
-
-  while (checksum > 255) {
-    checksum = checksum - (checksum / 256) * 256;
-  }
-
-  data1[36] = checksum & 0xFF;
-
-  Serial.write(data1, FIXED_MESSAGE_SIZE);
-  readSerial();
-}
-
-void flushSerialBuffer(){
-  while (Serial.read() >= 0) {
-    ArduinoOTA.handle();
-    client.loop();
-  }
-}
-
-void setupWiFi(){
+void setupWiFi() {
   WiFiManagerParameter mqttServer(PROPERTY_MQTT_SERVER_ADDRESS, "MQTT Address", mqttServerAddress, 40);
   WiFiManagerParameter mqttPort(PROPERTY_MQTT_SERVER_PORT, "MQTT Port", mqttServerPort, 6);
 
   WiFiManager wifiManager;
-  
+
   if (mqttServerAddress == "" || mqttServerPort == "") {
     trc("Resetting wifiManager");
     WiFi.disconnect();
@@ -604,10 +235,10 @@ void setupWiFi(){
 
   wifiManager.setSaveConfigCallback(saveConfigCallback);
   wifiManager.setConfigPortalTimeout(180);
-  
+
   wifiManager.addParameter(&mqttServer);
   wifiManager.addParameter(&mqttPort);
-  
+
   if (!wifiManager.autoConnect("ParadoxController", "")) {
     trc("Failed to initialise onboard access point");
     delay(3000);
@@ -619,7 +250,7 @@ void setupWiFi(){
 
   strcpy(mqttServerAddress, mqttServer.getValue());
   strcpy(mqttServerPort, mqttPort.getValue());
-  
+
   if (shouldSaveConfig) {
     trc("Saving configuration");
     DynamicJsonBuffer jsonBuffer;
@@ -637,8 +268,8 @@ void setupWiFi(){
   }
 
   trc("Setting MQTT Server connection");
-  unsigned int mqtt_port_x = atoi (mqttServerPort); 
-  client.setServer(mqttServerAddress, mqtt_port_x);
+  unsigned int mqttPortInt = atoi (mqttServerPort);
+  client.setServer(mqttServerAddress, mqttPortInt);
   client.setCallback(callback);
   reconnect();
 }
@@ -659,7 +290,7 @@ boolean reconnect() {
       blink(50);
       blink(50);
       blink(50);
-      sendMQTT(mqttTopicStatus,"online", true);
+      sendMQTT(mqttTopicStatus, "online", true);
       //Topic subscribed so as to get data
       subscribing(mqttTopicAction1);
       subscribing(mqttTopicAction2);
@@ -675,12 +306,11 @@ boolean reconnect() {
 
 void subscribing(String topicNameRec) { // MQTT subscribing to topic
   char topicStrRec[26];
-  topicNameRec.toCharArray(topicStrRec,26);
+  topicNameRec.toCharArray(topicStrRec, 26);
   // subscription to topic for receiving data
   boolean pubresult = client.subscribe(topicStrRec);
   if (pubresult) {
-    trc("Subscribed to ");
-    trc(topicNameRec);
+    trc("Subscribed to " + topicNameRec);
   }
 }
 
@@ -714,14 +344,405 @@ void readConfig() {
   }
 }
 
-void trc(String msg){
-  //Serial.println(msg);
+void checkPanelStatus() {
+  queryPanelStatus = true;
+}
+
+void loop() {
+  readSerial();
+  if ((responseMessage[0] & 0xF0) != COMMAND_LIVE_EVENT) { // re-align serial buffer
+    blink(200);
+    flushSerialBuffer();
+  }
+  if (queryPanelStatus && !busy) {
+    trc("Querying status from panel");
+    sendCommandToPanel("1", "status");
+    queryPanelStatus = false;
+  }
+}
+
+void saveConfigCallback () {
+  shouldSaveConfig = true;
+}
+
+void callback(char* topic, byte* payload, unsigned int length) {
+  // In order to republish this payload, a copy must be made
+  // as the orignal payload buffer will be overwritten whilst
+  // constructing the PUBLISH packet.
+  trc("Hey I got a callback ");
+  // Conversion to a printable string
+  payload[length] = '\0';
+
+  String strTopic(topic);
+
+  int partitionZoneIndex = strTopic.lastIndexOf("/");
+  String partitionZone;
+
+  if (partitionZoneIndex != -1) {
+    partitionZone = strTopic.substring(partitionZoneIndex + 1);
+  }
+
+  sendCommandToPanel (partitionZone, String ((char*)payload));
+}
+
+void sendCommandToPanel (String partitionZone, String command) {
+  busy = true;
+
+  if (!panelInitialised || !pannelConnected) {
+    panelInitialised = false;
+    pannelConnected = false;
+    doLogin("0000");
+  }
+
+  if (!panelInitialised) {
+    busy = false;
+    return;
+  }
+
+  int cnt = 0;
+  while (!pannelConnected && cnt < 10) {
+    readSerial();
+    cnt++;
+  }
+
+  if (pannelConnected) {
+    sendRequestToPanel(partitionZone, command);
+  } else {
+    trc("Unable to connect to panel");
+  }
+  busy = false;
+}
+
+void doLogin(String password) {
+  trc("Initialising panel");
+  char charpass1[4];
+  char charpass2[4];
+
+  String pass1 = password.substring(0, 2);
+  String pass2 = password.substring(2, 4);
+
+  pass1.toCharArray(charpass1, 4);
+  pass2.toCharArray(charpass2, 4);
+
+  unsigned long number1 = strtoul(charpass1, nullptr, 16);
+  unsigned long number2 = strtoul(charpass2, nullptr, 16);
+
+  byte panelPassword1 = number1 & 0xFF;
+  byte panelPassword2 = number2 & 0xFF;
+  
+  byte startCommunicationRequest[FIXED_MESSAGE_SIZE] = {};
+  byte initialiseCommunicationRequest[FIXED_MESSAGE_SIZE] = {};
+  byte checksum;
+
+  for (int x = 0; x < FIXED_MESSAGE_SIZE; x++) {
+    startCommunicationRequest[x] = 0x00;
+    initialiseCommunicationRequest[x] = 0x00;
+  }
+
+  flushSerialBuffer();
+  startCommunicationRequest[0] = COMMAND_START_COMMUNICATION;
+  startCommunicationRequest[1] = 0x20; // Extra validation byte
+  startCommunicationRequest[33] = SOURCE_ID_WINLOAD_DIRECT; // Source ID (See table 1)
+  startCommunicationRequest[34] = 0x00; // User ID high byte
+  startCommunicationRequest[35] = 0x00; // User ID low byte
+
+  checksum = 0;
+  for (int x = 0; x < FIXED_MESSAGE_SIZE - 1; x++) {
+    checksum += startCommunicationRequest[x];
+  }
+
+  while (checksum > 255) {
+    checksum = checksum - (checksum / 256) * 256;
+  }
+
+  startCommunicationRequest[36] = checksum & 0xFF;
+
+  Serial.write(startCommunicationRequest, FIXED_MESSAGE_SIZE);
+  readSerial();
+
+  initialiseCommunicationRequest[0] = COMMAND_INITIALISE_COMMUNICATION;
+  initialiseCommunicationRequest[4] = responseMessage[4]; // Panel Product ID
+  initialiseCommunicationRequest[5] = responseMessage[5]; // Panel Firmware Version
+  initialiseCommunicationRequest[6] = responseMessage[6]; // Panel Firmware Revision
+  initialiseCommunicationRequest[7] = responseMessage[7]; // Panel Firmware Build
+  initialiseCommunicationRequest[8] = responseMessage[8]; // Programmmed Panel ID Digit 1 & 2 (Not required for NEware)
+  initialiseCommunicationRequest[9] = responseMessage[9]; // Programmmed Panel ID Digit 3 & 4 (Not required for NEware)
+  initialiseCommunicationRequest[10] = panelPassword1; // Panel PC Password Digit 1 & 2 (Not required for NEware)
+  initialiseCommunicationRequest[11] = panelPassword2; // Panel PC Password Digit 3 & 4 (Not required for NEware)
+  initialiseCommunicationRequest[13] = 0x00; // Source Mode (old method) 0x00 Winload, 0x55 NEware
+  initialiseCommunicationRequest[33] = SOURCE_ID_WINLOAD_DIRECT; // Source ID (See table 1)
+  initialiseCommunicationRequest[34] = 0x00; // User ID high byte
+  initialiseCommunicationRequest[35] = 0x00; // User ID low byte
+
+  checksum = 0;
+  for (int x = 0; x < FIXED_MESSAGE_SIZE - 1; x++) {
+    checksum += initialiseCommunicationRequest[x];
+  }
+
+  while (checksum > 255) {
+    checksum = checksum - (checksum / 256) * 256;
+  }
+
+  initialiseCommunicationRequest[36] = checksum & 0xFF;
+
+  Serial.write(initialiseCommunicationRequest, FIXED_MESSAGE_SIZE);
+  readSerial();
+}
+
+void sendRequestToPanel(String partitionZone, String command) {
+  char charPartitionZone[4];
+  partitionZone.toCharArray(charPartitionZone, 4); // Convert the string to a char array
+  unsigned long longPartitionZone = strtoul(charPartitionZone, nullptr, 16); // convert the char array to an unsigned long
+  longPartitionZone--; // decrease by 1 as the partition or zone is zero based
+  byte bytePartitionZone = longPartitionZone & 0xFF; // convert the unsigned long to a byte
+  boolean actionSuccessful = true;
+  command.toLowerCase();
+  if (command == "arm_home" || command == "stay" || command == "0") {
+    actionSuccessful = performAction (ACTION_STAY_ARM, bytePartitionZone);
+  } else if (command == "arm_away" || command == "1") {
+    actionSuccessful = performAction (ACTION_FULL_ARM, bytePartitionZone);
+  } else if (command == "arm_night" || command == "2") {
+    actionSuccessful = performAction (ACTION_SLEEP_ARM, bytePartitionZone);
+  } else if (command == "disarm" || command == "3") {
+    actionSuccessful = performAction (ACTION_DISARM, bytePartitionZone);
+  } else if (command == "bypass" || command == "10") {
+    actionSuccessful = performAction (ACTION_BYPASS, bytePartitionZone);
+  } else if (command == "disconnect" || command == "99") {
+    closeConnection();
+  } else if (command == "status") {
+    systemStatus1();
+  }
+
+  // This is performed so that if an action fails, perhaps due to the panel being in a different status, this will query the status and update the arm/disarm status accordingly.
+  if (!actionSuccessful) {
+    sendCommandToPanel("1", "status");
+  }
+}
+
+boolean performAction(byte action, byte partitionZone) {
+  byte performActionRequest[FIXED_MESSAGE_SIZE] = {};
+  byte checksum;
+  for (int x = 0; x < FIXED_MESSAGE_SIZE; x++) {
+    performActionRequest[x] = 0x00;
+  }
+
+  performActionRequest[0] = COMMAND_PERFORM_ACTION;
+  performActionRequest[2] = action; // Action
+  performActionRequest[3] = partitionZone; // Partition or Zone number
+  performActionRequest[33] = SOURCE_ID_WINLOAD_DIRECT;
+  performActionRequest[34] = 0x00; // User ID high byte
+  performActionRequest[35] = 0x00; // User ID low byte
+  checksum = 0;
+
+  for (int x = 0; x < FIXED_MESSAGE_SIZE - 1; x++) {
+    checksum += performActionRequest[x];
+  }
+
+  while (checksum > 255) {
+    checksum = checksum - (checksum / 256) * 256;
+  }
+
+  performActionRequest[36] = checksum & 0xFF;
+
+  while (Serial.available() > FIXED_MESSAGE_SIZE)  {
+    trc("Read any other data off the serial port like events, etc");
+    readSerial();
+  }
+
+  trc("Sending perform action request");
+  Serial.write(performActionRequest, FIXED_MESSAGE_SIZE);
+  readSerial();
+
+  if (responseMessage[0] >= 40 && responseMessage[0] <= 45) {
+    trc("Perform action request successful");
+    return true;
+  }
+  return false;
+}
+
+void systemStatus1() {
+  byte systemStatusOneRequest[FIXED_MESSAGE_SIZE] = {};
+  byte checksum;
+  for (int x = 0; x < FIXED_MESSAGE_SIZE; x++) {
+    systemStatusOneRequest[x] = 0x00;
+  }
+
+  systemStatusOneRequest[0] = COMMAND_PANEL_STATUS_1;
+  systemStatusOneRequest[2] = 0x80; // Validation to distinguish from Eeprom read.
+  systemStatusOneRequest[3] = STATUS_REQUEST_1_SYSTEM;
+  systemStatusOneRequest[33] = SOURCE_ID_WINLOAD_DIRECT;
+  systemStatusOneRequest[34] = 0x00; // User ID high byte
+  systemStatusOneRequest[35] = 0x00; // User ID low byte
+
+  checksum = 0;
+  for (int x = 0; x < FIXED_MESSAGE_SIZE - 1; x++) {
+    checksum += systemStatusOneRequest[x];
+  }
+
+  while (checksum > 255) {
+    checksum = checksum - (checksum / 256) * 256;
+  }
+
+  systemStatusOneRequest[36] = checksum & 0xFF;
+
+  Serial.write(systemStatusOneRequest, FIXED_MESSAGE_SIZE);
+  readSerial();
+}
+
+void closeConnection() {
+  byte closeConnectionRequest[FIXED_MESSAGE_SIZE] = {};
+  byte checksum;
+  for (int x = 0; x < FIXED_MESSAGE_SIZE; x++) {
+    closeConnectionRequest[x] = 0x00;
+  }
+
+  closeConnectionRequest[0] = COMMAND_CLOSE_CONNECTION;
+  closeConnectionRequest[2] = 0x05; // Validation byte
+  closeConnectionRequest[33] = SOURCE_ID_WINLOAD_DIRECT;
+  closeConnectionRequest[34] = 0x00; // User ID high byte
+  closeConnectionRequest[35] = 0x00; // User ID low byte
+
+  checksum = 0;
+  for (int x = 0; x < FIXED_MESSAGE_SIZE - 1; x++) {
+    checksum += closeConnectionRequest[x];
+  }
+
+  while (checksum > 255) {
+    checksum = checksum - (checksum / 256) * 256;
+  }
+
+  closeConnectionRequest[36] = checksum & 0xFF;
+
+  Serial.write(closeConnectionRequest, FIXED_MESSAGE_SIZE);
+  readSerial();
+}
+
+void readSerial() {
+  trc("About to read the serial port");
+  while (Serial.available() < FIXED_MESSAGE_SIZE) {
+    ArduinoOTA.handle();
+    client.loop();
+  }
+  trc("All 37 bytes are present.  Reading bytes");
+
+  byte positionIndex = 0;
+
+  while (positionIndex < FIXED_MESSAGE_SIZE) {  // Paradox packet is 37 bytes
+    responseMessage[positionIndex++] = Serial.read();
+  }
+
+  responseMessage[++positionIndex] = 0x00; // Make it print-friendly
+
+  if ((responseMessage[0] & 0xF0) == COMMAND_LIVE_EVENT) {
+    byte command = responseMessage[0];
+    byte eventGroupNumber = responseMessage[7];
+    byte eventSubGroupNumber = responseMessage[8];
+    byte partition = responseMessage[9];
+    String label = String(responseMessage[15]) + String(responseMessage[16]) + String(responseMessage[17]) + String(responseMessage[18]) + String(responseMessage[19]) + String(responseMessage[20]) + String(responseMessage[21]) + String(responseMessage[22]) + String(responseMessage[23]) + String(responseMessage[24]) + String(responseMessage[25]) + String(responseMessage[26]) + String(responseMessage[27]) + String(responseMessage[28]) + String(responseMessage[29]) + String(responseMessage[30]);
+    label.trim();
+    sendJsonString(command, eventGroupNumber, eventSubGroupNumber, partition, label);
+    if (eventGroupNumber == EVENT_GROUP_SPECIAL && eventSubGroupNumber == SPECIAL_SOFTWARE_LOG_OFF) {
+      pannelConnected = false;
+    } else if (eventGroupNumber == EVENT_GROUP_SPECIAL && eventSubGroupNumber == SPECIAL_SOFTWARE_LOG_ON && !pannelConnected) {
+      pannelConnected = true;
+    }
+  } else if (responseMessage[0] == COMMAND_INITIALISE_COMMUNICATION_SUCCESSFUL) {
+    panelInitialised = true;
+  } else if ((responseMessage[0] & 0xF0) == COMMAND_PANEL_STATUS_1) {
+    int partition1Status = bitRead(responseMessage[17], 0);
+    int partition2Status = bitRead(responseMessage[21], 0);
+    if (partition1Status == 1) {
+      sendMQTT(mqttTopicAlarmStatus + "1", ALARM_STATUS_ARMED_AWAY, true);
+    } else {
+      sendMQTT(mqttTopicAlarmStatus + "1", ALARM_STATUS_DISARMED, true);
+    }
+    if (partition2Status == 1) {
+      sendMQTT(mqttTopicAlarmStatus + "2", ALARM_STATUS_ARMED_AWAY, true);
+    } else {
+      sendMQTT(mqttTopicAlarmStatus + "2", ALARM_STATUS_DISARMED, true);
+    }
+  }
+}
+
+void sendJsonString (byte command, byte eventGroupNumber, byte eventSubGroupNumber, byte partition, String label) {
+  if (eventGroupNumber == EVENT_GROUP_PARTITION_STATUS) {
+    if (eventSubGroupNumber == PARTITION_STATUS_ARM_PARTITION) {
+      sendMQTT(mqttTopicAlarmStatus + String(partition + 1), ALARM_STATUS_ARMED_AWAY, true);
+      return;
+    } else if (eventSubGroupNumber == PARTITION_STATUS_DISARM_PARTITION) {
+      sendMQTT(mqttTopicTriggerZone, "0", true);
+      sendMQTT(mqttTopicAlarmStatus + String(partition + 1), ALARM_STATUS_DISARMED, true);
+      return;
+    } else if (eventSubGroupNumber == PARTITION_STATUS_ALARM_STOPPED) {
+      sendMQTT(mqttTopicAlarmStatus + String(partition + 1), ALARM_STATUS_ALARM_STOPPED, true);
+      return;
+    }
+  } else if (eventGroupNumber == EVENT_GROUP_SPECIAL_ALARM) {
+    if (eventSubGroupNumber == SPECIAL_ALARM_PANIC_NON_MEDICAL) {
+      sendMQTT(mqttTopicAlarmStatus + String(partition + 1), ALARM_STATUS_ALARM_TRIGGERED, true);
+      return;
+    }
+  } else if (eventGroupNumber == EVENT_GROUP_ZOME_IN_ALARM) {
+    sendMQTT(mqttTopicEventZone + String(eventSubGroupNumber), "1", true);
+    sendMQTT(mqttTopicTriggerZone, String(eventSubGroupNumber), false);
+    sendMQTT(mqttTopicAlarmStatus + String(partition + 1), ALARM_STATUS_ALARM_TRIGGERED, true);
+    return;
+  } else if (eventGroupNumber == EVENT_GROUP_ZONE_ALARM_RESTORE) {
+    sendMQTT(mqttTopicEventZone + String(eventSubGroupNumber), "0", true);
+    return;
+  } else if (eventGroupNumber == EVENT_GROUP_ZONE_CLOSED || eventGroupNumber == EVENT_GROUP_ZONE_OPEN) {
+    sendMQTT(mqttTopicEventZone + String(eventSubGroupNumber), String(eventGroupNumber), true);
+    return;
+  }
+
+  char commandHex[6];
+  sprintf(commandHex, "%02X", command);  
+  
+  String liveEvent = "{ \"command\":" + String(commandHex) + ", \"eventGroupNumber\":" + String(eventGroupNumber) + ", \"eventSubGroupNumber\":" + String(eventSubGroupNumber) + ", \"partition\":" + String(partition) + ", \"label\":\"" + String(label) + "\"}";
+  sendMQTT(mqttTopicEvent, liveEvent);
+}
+
+void sendMQTT(String topicNameSend, String dataStr) {
+  sendMQTT(topicNameSend, dataStr, false);
+}
+
+void sendMQTT(String topicNameSend, String dataStr, boolean retained) {
+  if (!client.connected()) {
+    long now = millis();
+    if (now - lastReconnectAttempt > 5000) {
+      lastReconnectAttempt = now;
+      trc("MQTT not connected.  Attemping to reconnect ...");
+      if (reconnect()) {
+        lastReconnectAttempt = 0;
+      }
+    }
+  } else {
+    client.loop();
+  }
+  char topicStrSend[40];
+  topicNameSend.toCharArray(topicStrSend, 40);
+  char dataStrSend[200];
+  dataStr.toCharArray(dataStrSend, 200);
+  if (!client.publish(topicStrSend, dataStrSend, retained)) {
+    trc("Message not published");
+  }
+}
+
+void flushSerialBuffer() {
+  while (Serial.read() >= 0) {
+    ArduinoOTA.handle();
+    client.loop();
+  }
+}
+
+void trc(String msg) {
+  // Serial.println(msg);
 }
 
 void blink(int duration) {
-  digitalWrite(LED_BUILTIN,LOW);
+  digitalWrite(LED_BUILTIN, LOW);
   delay(duration);
-  digitalWrite(LED_BUILTIN,HIGH);
+  digitalWrite(LED_BUILTIN, HIGH);
   delay(duration);
 }
 
