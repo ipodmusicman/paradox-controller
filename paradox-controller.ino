@@ -17,7 +17,6 @@
 #include <PubSubClient.h>
 #include <WiFiManager.h>
 #include <ArduinoJson.h>
-#include <Ticker.h>
 
 #define mqttServerAddress "127.0.0.1"
 #define mqttServerPort "1883"
@@ -187,13 +186,10 @@ PubSubClient client(wifiClient);
 bool shouldSaveConfig = false;
 bool panelInitialised = false;
 bool pannelConnected = false;
-bool queryPanelStatus = false;
 
 long lastReconnectAttempt = 0;
 
 char responseMessage[38]; // Allocate some space for the response message
-Ticker pollStatusTimer;
-boolean busy = false;
 
 void setup() {
   pinMode(LED_BUILTIN, OUTPUT);
@@ -217,7 +213,6 @@ void setup() {
   blink(100);
   delay(1500);
   lastReconnectAttempt = 0;
-  pollStatusTimer.attach(60, checkPanelStatus);
 }
 
 void setupWiFi() {
@@ -345,22 +340,20 @@ void readConfig() {
   }
 }
 
-void checkPanelStatus() {
-  queryPanelStatus = true;
-}
-
 void loop() {
-  readSerial();
+  while (Serial.available() < FIXED_MESSAGE_SIZE) {
+    ArduinoOTA.handle();
+    handleMqttKeepAlive();
+  }
+
+  readMessageFromSerial();
+  processEventMessage();
+
   if ((responseMessage[0] & 0xF0) != COMMAND_LIVE_EVENT &&
      (responseMessage[0] & 0xF0) != COMMAND_PERFORM_ACTION &&
      (responseMessage[0] & 0xF0) != COMMAND_PANEL_STATUS_1 &&
      (responseMessage[0] & 0xF0) != COMMAND_CLOSE_CONNECTION) { 
     flushSerialBuffer();
-  }
-  if (queryPanelStatus && !busy) {
-    trc("Querying status from panel");
-    sendCommandToPanel("1", "status");
-    queryPanelStatus = false;
   }
 }
 
@@ -384,8 +377,6 @@ void callback(char* topic, byte* payload, unsigned int length) {
 }
 
 void sendCommandToPanel (String partitionZone, String command) {
-  busy = true;
-
   if (!panelInitialised || !pannelConnected) {
     panelInitialised = false;
     pannelConnected = false;
@@ -393,13 +384,13 @@ void sendCommandToPanel (String partitionZone, String command) {
   }
 
   if (!panelInitialised) {
-    busy = false;
     return;
   }
 
   int cnt = 0;
   while (!pannelConnected && cnt < 10) {
-    readSerial();
+    readMessageFromSerial();
+    processEventMessage();
     cnt++;
   }
 
@@ -408,7 +399,6 @@ void sendCommandToPanel (String partitionZone, String command) {
   } else {
     trc("Unable to connect to panel");
   }
-  busy = false;
 }
 
 void doLogin(String password) {
@@ -456,7 +446,7 @@ void doLogin(String password) {
   startCommunicationRequest[36] = checksum & 0xFF;
 
   Serial.write(startCommunicationRequest, FIXED_MESSAGE_SIZE);
-  readResponseMessageFromSerial();
+  readMessageFromSerial();
 
   initialiseCommunicationRequest[0] = COMMAND_INITIALISE_COMMUNICATION;
   initialiseCommunicationRequest[4] = responseMessage[4]; // Panel Product ID
@@ -484,7 +474,7 @@ void doLogin(String password) {
   initialiseCommunicationRequest[36] = checksum & 0xFF;
 
   Serial.write(initialiseCommunicationRequest, FIXED_MESSAGE_SIZE);
-  readResponseMessageFromSerial();
+  readMessageFromSerial();
 
   if (responseMessage[0] == COMMAND_INITIALISE_COMMUNICATION_SUCCESSFUL) {
     panelInitialised = true;
@@ -524,7 +514,8 @@ void sendRequestToPanel(String partitionZone, String command) {
 boolean performAction(byte action, byte partitionZone) {
   while (Serial.available() > FIXED_MESSAGE_SIZE) {
     trc("Read any other data off the serial port like events, etc");
-    readSerial();
+    readMessageFromSerial();
+    processEventMessage();
   }
   
   byte performActionRequest[FIXED_MESSAGE_SIZE] = {};
@@ -553,7 +544,7 @@ boolean performAction(byte action, byte partitionZone) {
 
   trc("Sending perform action request");
   Serial.write(performActionRequest, FIXED_MESSAGE_SIZE);
-  readResponseMessageFromSerial();
+  readMessageFromSerial();
 
   if (responseMessage[0] >= 40 && responseMessage[0] <= 45) {
     trc("Perform action request successful");
@@ -588,7 +579,7 @@ void systemStatus1() {
   systemStatusOneRequest[36] = checksum & 0xFF;
 
   Serial.write(systemStatusOneRequest, FIXED_MESSAGE_SIZE);
-  readResponseMessageFromSerial();
+  readMessageFromSerial();
 
   if ((responseMessage[0] & 0xF0) == COMMAND_PANEL_STATUS_1) {
     int partition1Status = bitRead(responseMessage[17], 0);
@@ -631,30 +622,22 @@ void closeConnection() {
   closeConnectionRequest[36] = checksum & 0xFF;
 
   Serial.write(closeConnectionRequest, FIXED_MESSAGE_SIZE);
-  readResponseMessageFromSerial();
+  readMessageFromSerial();
 }
 
-void readSerial() {
-  while (Serial.available() < FIXED_MESSAGE_SIZE) {
-    ArduinoOTA.handle();
-    handleMqttKeepAlive();
-  }
-
-  byte positionIndex = 0;
-
-  while (positionIndex < FIXED_MESSAGE_SIZE) {  // Paradox packet is 37 bytes
-    responseMessage[positionIndex++] = Serial.read();
-  }
-
-  responseMessage[++positionIndex] = 0x00; // Make it print-friendly
-
+void processEventMessage() {
   if ((responseMessage[0] & 0xF0) == COMMAND_LIVE_EVENT) {
     byte command = responseMessage[0];
     byte eventGroupNumber = responseMessage[7];
     byte eventSubGroupNumber = responseMessage[8];
     byte partition = responseMessage[9];
-    String label = String(responseMessage[15]) + String(responseMessage[16]) + String(responseMessage[17]) + String(responseMessage[18]) + String(responseMessage[19]) + String(responseMessage[20]) + String(responseMessage[21]) + String(responseMessage[22]) + String(responseMessage[23]) + String(responseMessage[24]) + String(responseMessage[25]) + String(responseMessage[26]) + String(responseMessage[27]) + String(responseMessage[28]) + String(responseMessage[29]) + String(responseMessage[30]);
-    label.trim();
+    String label = "";
+    if (responseMessage[14] != 1) {
+      for (int k = 15; k <= 30; k++) {
+        label = label + String(responseMessage[k]);
+      }
+      label.trim();
+    }    
     sendJsonString(command, eventGroupNumber, eventSubGroupNumber, partition, label);
     if (eventGroupNumber == EVENT_GROUP_SPECIAL && eventSubGroupNumber == SPECIAL_SOFTWARE_LOG_OFF) {
       pannelConnected = false;
@@ -664,7 +647,7 @@ void readSerial() {
   }
 }
 
-void readResponseMessageFromSerial() {
+void readMessageFromSerial() {
   while (Serial.available() < FIXED_MESSAGE_SIZE) {
     yield(); 
   }
@@ -712,7 +695,6 @@ void sendJsonString (byte command, byte eventGroupNumber, byte eventSubGroupNumb
 
   char commandHex[6];
   sprintf(commandHex, "%02X", command);  
-  
   String liveEvent = "{ \"command\":" + String(commandHex) + ", \"eventGroupNumber\":" + String(eventGroupNumber) + ", \"eventSubGroupNumber\":" + String(eventSubGroupNumber) + ", \"partition\":" + String(partition) + ", \"label\":\"" + String(label) + "\"}";
   sendMQTT(mqttTopicEvent, liveEvent);
 }
@@ -749,7 +731,6 @@ void handleMqttKeepAlive() {
 
 void flushSerialBuffer() {
   Serial.flush();
-  delay(1000);
   while (Serial.read() >= 0)
   {
     ArduinoOTA.handle();
