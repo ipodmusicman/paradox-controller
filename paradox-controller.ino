@@ -585,14 +585,14 @@ void systemStatus1() {
     int partition1Status = bitRead(responseMessage[17], 0);
     int partition2Status = bitRead(responseMessage[21], 0);
     if (partition1Status == 1) {
-      sendMQTT(mqttTopicAlarmStatus + "1", ALARM_STATUS_ARMED_AWAY, true);
+      sendMQTT(mqttTopicAlarmStatus + String(1), ALARM_STATUS_ARMED_AWAY, true);
     } else {
-      sendMQTT(mqttTopicAlarmStatus + "1", ALARM_STATUS_DISARMED, true);
+      sendMQTT(mqttTopicAlarmStatus + String(1), ALARM_STATUS_DISARMED, true);
     }
     if (partition2Status == 1) {
-      sendMQTT(mqttTopicAlarmStatus + "2", ALARM_STATUS_ARMED_AWAY, true);
+      sendMQTT(mqttTopicAlarmStatus + String(2), ALARM_STATUS_ARMED_AWAY, true);
     } else {
-      sendMQTT(mqttTopicAlarmStatus + "2", ALARM_STATUS_DISARMED, true);
+      sendMQTT(mqttTopicAlarmStatus + String(2), ALARM_STATUS_DISARMED, true);
     }
   }  
 }
