@@ -78,7 +78,7 @@ The controller can receive commands on the following topics:
 ## To configure in Home Assistant
 
 Edit your configuration.yaml file and add the following entries.  Note that my alarm has two partitions so two alarm panels are added.
-
+```
 alarm_control_panel:
  - platform: mqtt
    name: paradox_alarm_partition_1
@@ -92,11 +92,11 @@ alarm_control_panel:
    state_topic: "paradox/alarm_status/2"
    command_topic: "paradox/action/2"
    availability_topic:  "paradox/status"
-
+```
 In order to add the zones as binary sensors, duplicate each zone into your configuration.yaml as below, but changing the state_topic from zone/1 to zone/2, zone/3 etc for each zone.  Give it a good name for each zone and a device class.
 
 eg:
-
+```
 binary_sensor:
   - platform: mqtt
     name: Lounge Window
@@ -104,7 +104,7 @@ binary_sensor:
     device_class: window
     payload_on: 1
     payload_off: 0
-
+```
 ## Acknowledgments
 
 * See https://github.com/maragelis/ParadoxRs232toMqtt.  He developed the original sketch and I decided to modify it for my own use.  His development is also ongoing so check out his sketch as well.
