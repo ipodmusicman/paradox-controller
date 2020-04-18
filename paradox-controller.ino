@@ -20,10 +20,14 @@
 
 #define mqttServerAddress "127.0.0.1"
 #define mqttServerPort "1883"
+#define mqttUsername "secretUser"
+#define mqttPassword "sercretPass"
 #define serverHostname "Paradox"
 
 #define PROPERTY_MQTT_SERVER_ADDRESS "mqtt_server_address"
 #define PROPERTY_MQTT_SERVER_PORT "mqtt_server_port"
+#define PROPERTY_MQTT_USERNAME "mqtt_username"
+#define PROPERTY_MQTT_PASSWORD "mqtt_password"
 
 const byte COMMAND_START_COMMUNICATION = 0x5f;
 const byte COMMAND_INITIALISE_COMMUNICATION = 0x00;
@@ -218,6 +222,9 @@ void setup() {
 void setupWiFi() {
   WiFiManagerParameter mqttServer(PROPERTY_MQTT_SERVER_ADDRESS, "MQTT Address", mqttServerAddress, 40);
   WiFiManagerParameter mqttPort(PROPERTY_MQTT_SERVER_PORT, "MQTT Port", mqttServerPort, 6);
+  WiFiManagerParameter mqttUser(PROPERTY_MQTT_USERNAME, "MQTT Username", mqttUsername, 40);
+  WiFiManagerParameter mqttPass(PROPERTY_MQTT_PASSWORD, "MQTT Password", mqttPassword, 40);
+
 
   WiFiManager wifiManager;
 
@@ -234,6 +241,8 @@ void setupWiFi() {
 
   wifiManager.addParameter(&mqttServer);
   wifiManager.addParameter(&mqttPort);
+  wifiManager.addParameter(&mqttUser);
+  wifiManager.addParameter(&mqttPass);
 
   if (!wifiManager.autoConnect("ParadoxController", "")) {
     trc("Failed to initialise onboard access point");
@@ -246,6 +255,8 @@ void setupWiFi() {
 
   strcpy(mqttServerAddress, mqttServer.getValue());
   strcpy(mqttServerPort, mqttPort.getValue());
+  strcpy(mqttUsername, mqttUser.getValue());
+  strcpy(mqttPassword, mqttPass.getValue());
 
   if (shouldSaveConfig) {
     trc("Saving configuration");
@@ -253,6 +264,8 @@ void setupWiFi() {
     JsonObject& json = jsonBuffer.createObject();
     json[PROPERTY_MQTT_SERVER_ADDRESS] = mqttServerAddress;
     json[PROPERTY_MQTT_SERVER_PORT] = mqttServerPort;
+    json[PROPERTY_MQTT_USERNAME] = mqttUsername;
+    json[PROPERTY_MQTT_PASSWORD] = mqttPassword;
 
     File configFile = SPIFFS.open("/config.json", "w");
     if (!configFile) {
@@ -281,7 +294,7 @@ boolean reconnect() {
     char topicStatus[50];
     mqttTopicStatus.toCharArray(topicStatus, 50);
     blink(100);
-    if (client.connect(charBuf, topicStatus, 0, true, "offline")) {
+    if (client.connect(charBuf, mqttUsername, mqttPassword, topicStatus, 0, true, "offline")) {
       trc("Connected to MQTT Server");
       blink(50);
       blink(50);
@@ -328,6 +341,8 @@ void readConfig() {
         if (json.success()) {
           strcpy(mqttServerAddress, json[PROPERTY_MQTT_SERVER_ADDRESS]);
           strcpy(mqttServerPort, json[PROPERTY_MQTT_SERVER_PORT]);
+          strcpy(mqttPassword, json[PROPERTY_MQTT_PASSWORD]);
+          strcpy(mqttUsername, json[PROPERTY_MQTT_USERNAME]);
         } else {
           trc("Failed to read configuration");
         }
