@@ -1,3 +1,7 @@
+## Update
+
+I've decided to use PAI (https://github.com/ParadoxAlarmInterface/pai) instead of this sketch for my Paradox integration with Home Assistant.  PAI is super feature rich and a lot more stable.  As such, this project is no longer going to be actively maintained.
+
 # Paradox Controller
 
 This ESP8266 sketch acts as a bridge between Paradox alarm systems and platforms supporting MQTT. To coin the phase "Making your dumpb alarm system, a smart alarm system".  :)  This controller works with various Paradox alarm systems that support the serial port control protocol.  This was tested on a Paradox SP6000.  The MQTT interface is compatbile with MQTT Alarm Panel as defined within Home Assistant.  This means that you can configure the MQTT alarm panel within Home Assistant and configure the required MQTT topics in order to arm/disarm your alarm as well as get alarted when the alarm has been triggered.  This sketch supports the management of up to two alarm partitions.
@@ -108,4 +112,3 @@ binary_sensor:
 ## Acknowledgments
 
 * See https://github.com/maragelis/ParadoxRs232toMqtt.  He developed the original sketch and I decided to modify it for my own use.  His development is also ongoing so check out his sketch as well.
-
